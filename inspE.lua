@@ -682,94 +682,222 @@ end
 -- GUI-ONLY EXPORT
 -- =========================================
 
+
+-- =========================================
+-- InspE v1.0 - GUI Export Fix
+-- Replace the existing exportGUI function.
+-- =========================================
+
 local function exportGUI()
     local root = findSite()
 
     if not root then
-        status("No active site found",T.red)
+        status("No active CatWEB site", T.red)
         return
     end
 
+    local usedIDs = {}
     local idCounter = 0
-    local used = {}
+    local warnings = {}
+
+    local function safe(obj, prop)
+        local ok, value = pcall(function()
+            return obj[prop]
+        end)
+        if ok then return value end
+        return nil
+    end
 
     local function getID(obj)
-        local id = obj:GetAttribute("globalid")
+        local id =
+            obj:GetAttribute("globalid")
             or obj:GetAttribute("GlobalID")
+            or obj:GetAttribute("GlobalId")
 
         if id ~= nil then
             id = tostring(id)
 
-            if not used[id] then
-                used[id] = true
+            if not usedIDs[id] then
+                usedIDs[id] = true
                 return id
             end
         end
 
         repeat
             idCounter += 1
-            id = "inspe_"..idCounter
-        until not used[id]
+            id = "inspe_" .. idCounter
+        until not usedIDs[id]
 
-        used[id] = true
+        usedIDs[id] = true
         return id
     end
 
+    local function number(n)
+        if n == 0 then return "0" end
+        return tostring(math.round(n * 10000) / 10000)
+    end
+
+    -- Native CatWEB-style UDim2 representation.
+    local function udim2(v)
+        return string.format(
+            "{%s, %s},{%s, %s}",
+            number(v.X.Scale),
+            number(v.X.Offset),
+            number(v.Y.Scale),
+            number(v.Y.Offset)
+        )
+    end
+
+    local function hasLayout(parent)
+        if not parent then return false end
+
+        for _, child in ipairs(parent:GetChildren()) do
+            if child:IsA("UIListLayout")
+                or child:IsA("UIGridLayout")
+                or child:IsA("UIPageLayout")
+                or child:IsA("UITableLayout") then
+                return true
+            end
+        end
+
+        return false
+    end
+
+    -- An explicit Position value can be 0,0 even
+    -- while a layout positions the object elsewhere.
+    --
+    -- Bake the currently displayed position for
+    -- layout-controlled objects.
+
+    local function actualPosition(obj)
+        local parent = obj.Parent
+        local original = obj.Position
+
+        if not parent or
+            not parent:IsA("GuiObject") then
+            return original
+        end
+
+        if not hasLayout(parent) then
+            return original
+        end
+
+        local ok, result = pcall(function()
+            local relative =
+                obj.AbsolutePosition
+                - parent.AbsolutePosition
+
+            -- Position is measured at the
+            -- anchor point, not necessarily
+            -- the object's top-left corner.
+            local anchor = obj.AnchorPoint
+            local absoluteSize = obj.AbsoluteSize
+
+            local x = relative.X
+                + absoluteSize.X * anchor.X
+
+            local y = relative.Y
+                + absoluteSize.Y * anchor.Y
+
+            return UDim2.fromOffset(x, y)
+        end)
+
+        if ok then
+            return result
+        end
+
+        return original
+    end
+
+    local function isText(obj)
+        return obj:IsA("TextLabel")
+            or obj:IsA("TextButton")
+            or obj:IsA("TextBox")
+    end
+
+    local function isImage(obj)
+        return obj:IsA("ImageLabel")
+            or obj:IsA("ImageButton")
+    end
+
+    -- Only use property names already established
+    -- for CatWEB. Unknown Roblox properties must
+    -- not be added directly as JSON keys.
+
     local function serialize(obj)
-        if not isGUI(obj) then return nil end
+        if not isGUI(obj) then
+            return nil
+        end
+
+        if obj.Name == "InspE_Selection" then
+            return nil
+        end
 
         local data = {
             class = obj.ClassName,
             globalid = getID(obj),
-            size = tostring(obj.Size),
+
+            -- Always include both.
+            size = udim2(obj.Size),
+            position = udim2(actualPosition(obj)),
+
             background_color =
                 hex(obj.BackgroundColor3),
+
             background_transparency =
                 tostring(obj.BackgroundTransparency)
         }
 
+        -- Preserve user-assigned aliases.
         if obj.Name ~= "WebRendererObject"
             and obj.Name ~= obj.ClassName then
             data.alias = obj.Name
         end
 
-        if obj.Position ~= UDim2.new() then
-            data.position = tostring(obj.Position)
-        end
-
-        if obj:IsA("TextLabel")
-            or obj:IsA("TextButton")
-            or obj:IsA("TextBox") then
-
+        -- TEXT OBJECTS
+        if isText(obj) then
             data.text = obj.Text
             data.rich = tostring(obj.RichText)
-            data.align_x = obj.TextXAlignment.Name
-            data.align_y = obj.TextYAlignment.Name
+
+            data.align_x =
+                obj.TextXAlignment.Name
+
+            data.align_y =
+                obj.TextYAlignment.Name
+
             data.font_size =
-                obj.TextScaled and "scaled"
-                or tostring(obj.TextSize)
-            data.font_color = hex(obj.TextColor3)
+                obj.TextScaled
+                and "scaled"
+                or number(obj.TextSize)
+
+            data.font_color =
+                hex(obj.TextColor3)
+
+            -- Verified CatWEB key:
             data.font_transparency =
                 tostring(obj.TextTransparency)
         end
 
-        if obj:IsA("ImageLabel")
-            or obj:IsA("ImageButton") then
-
+        -- IMAGE OBJECTS
+        if isImage(obj) then
             if obj.Image ~= "" then
                 data.image = obj.Image
             end
         end
 
+        -- Child GUI elements
         local children = {}
 
-        for _,child in ipairs(
-            guiChildren(obj)
+        for _, child in ipairs(
+            obj:GetChildren()
         ) do
-            local entry = serialize(child)
+            if isGUI(child) then
+                local converted = serialize(child)
 
-            if entry then
-                children[#children+1] = entry
+                if converted then
+                    children[#children + 1] =
+                        converted
+                end
             end
         end
 
@@ -779,19 +907,27 @@ local function exportGUI()
             data.children = children
         end
 
+        -- Diagnostic warning: some properties
+        -- don't yet have verified CatWEB mappings.
+        if obj.Rotation ~= 0 then
+            warnings[#warnings + 1] =
+                obj:GetFullName()
+                .. ": rotation needs mapping"
+        end
+
         return data
     end
 
-    -- Export the active site, not only the
-    -- selected element.
+    local webcontent = {}
 
-    local content = {}
+    for _, child in ipairs(root:GetChildren()) do
+        if isGUI(child) then
+            local converted = serialize(child)
 
-    for _,child in ipairs(guiChildren(root)) do
-        local result = serialize(child)
-
-        if result then
-            content[#content+1] = result
+            if converted then
+                webcontent[#webcontent + 1] =
+                    converted
+            end
         end
     end
 
@@ -800,55 +936,68 @@ local function exportGUI()
             root:GetAttribute("title")
             or siteURL()
         ),
-        background =
-            hex(root.BackgroundColor3),
-        webcontent = content
+        background = hex(root.BackgroundColor3),
+        webcontent = webcontent
     }
 
     local favicon =
         root:GetAttribute("favicon")
         or root:GetAttribute("Favicon")
+        or root:GetAttribute("FaviconId")
 
-    if favicon then
+    if favicon ~= nil then
         output.favicon = tostring(favicon)
     end
 
-    local ok,json = pcall(function()
+    local ok, json = pcall(function()
         return Http:JSONEncode(output)
     end)
 
     if not ok then
-        status("JSON encoding failed",T.red)
+        status("JSON encoding failed", T.red)
         return
     end
 
-    local name =
-        "InspE_GUI_"..os.time()..".json"
+    local filename =
+        "InspE_GUI_Fixed_"
+        .. os.time()
+        .. ".json"
+
+    local saved = false
 
     if type(writefile) == "function" then
-        local saved = pcall(function()
-            writefile(name,json)
+        saved = pcall(function()
+            writefile(filename, json)
         end)
-
-        if saved then
-            status("Exported: "..name,T.green)
-            return
-        end
     end
 
-    if type(setclipboard) == "function" then
-        local copied = pcall(function()
+    if not saved and
+        type(setclipboard) == "function" then
+        saved = pcall(function()
             setclipboard(json)
         end)
-
-        if copied then
-            status("GUI JSON copied",T.green)
-            return
-        end
     end
 
-    status("No working export API",T.red)
+    if not saved then
+        status("Export failed", T.red)
+        return
+    end
+
+    status(
+        "GUI exported | "
+        .. #warnings
+        .. " property warnings",
+        T.green
+    )
+
+    print("[InspE] Exported:", filename)
+    print("[InspE] Root objects:", #webcontent)
+
+    for _, warning in ipairs(warnings) do
+        warn("[InspE]", warning)
+    end
 end
+
 
 -- =========================================
 -- APPLY / UNDO
