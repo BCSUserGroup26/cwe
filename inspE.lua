@@ -1348,7 +1348,7 @@ print("[InspE] GUI-only export enabled")
 -- =========================================
 
 task.defer(function()
-    local targetURL = "cwe-exploit/inspe"
+    local targetURL = "cwe-exploit.rbx/inspe"
 
     local top = mainUI:WaitForChild("top_actions", 5)
     local container = top and top:FindFirstChild("container")
